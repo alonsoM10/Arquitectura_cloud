@@ -1,0 +1,18 @@
+# Copia este archivo a terraform.tfvars y ajusta según necesites.
+# terraform.tfvars está en .gitignore (no se sube al repo).
+
+region      = "us-east-1"
+name_prefix = "freshbox"
+
+# Instancia de la base de datos
+db_instance_class = "db.t3.micro"
+
+# WAF sobre CloudFront (poner false si el Learner Lab lo bloquea)
+enable_waf = true
+
+# --- Solo para cargar init.sql en RDS (dejar en false normalmente) ---
+# 1) Poner true y tu IP, ejecutar: terraform apply
+# 2) Cargar init.sql con mysql
+# 3) Volver a false y: terraform apply
+enable_db_public_seeding = false
+# my_ip_cidr = "TU.IP.PUBLICA/32"
