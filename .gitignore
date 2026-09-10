@@ -1,0 +1,30 @@
+# === Node ===
+node_modules/
+npm-debug.log*
+.env
+.env.*
+
+# === Terraform ===
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# Nunca subir variables con secretos; sí subir el ejemplo
+*.tfvars
+!*.tfvars.example
+
+# === AWS / credenciales ===
+.aws/
+credentials
+*.pem
+
+# === Guía docente (clave de respuestas — no publicar) ===
+app/scripts/guia-docente-ep1.md
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
