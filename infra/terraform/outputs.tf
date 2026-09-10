@@ -1,13 +1,8 @@
 # Salidas útiles tras el apply
 
-output "cloudfront_url" {
-  description = "URL pública del sitio (frontend + API vía /api)"
-  value       = "https://${aws_cloudfront_distribution.main.domain_name}"
-}
-
-output "alb_dns" {
-  description = "DNS del ALB (para pruebas directas del API)"
-  value       = aws_lb.main.dns_name
+output "app_url" {
+  description = "URL pública de la app (frontend en / y API en /api/*)"
+  value       = "http://${aws_lb.main.dns_name}"
 }
 
 output "rds_endpoint" {
@@ -28,4 +23,20 @@ output "ecr_repositories" {
 output "vpc_id" {
   description = "ID de la VPC"
   value       = aws_vpc.main.id
+}
+
+# --- Usados por el script de seed (tarea Fargate dentro de la VPC) ---
+output "cluster_name" {
+  description = "Nombre del cluster ECS"
+  value       = aws_ecs_cluster.main.name
+}
+
+output "public_subnet_ids" {
+  description = "IDs de las subredes públicas"
+  value       = local.public_subnet_ids
+}
+
+output "app_sg_id" {
+  description = "ID del Security Group de la capa App (permite 3306 → RDS)"
+  value       = aws_security_group.app.id
 }

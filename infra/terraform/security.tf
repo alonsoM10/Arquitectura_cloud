@@ -42,6 +42,14 @@ resource "aws_security_group" "app" {
   vpc_id      = aws_vpc.main.id
 
   ingress {
+    description     = "Frontend HTTP 80 desde el ALB"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  ingress {
     description     = "Puertos backend 3001-3004 desde el ALB"
     from_port       = 3001
     to_port         = 3004

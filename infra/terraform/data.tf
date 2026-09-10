@@ -7,16 +7,6 @@ data "aws_caller_identity" "current" {}
 data "aws_iam_role" "lab" {
   name = "LabRole"
 }
-
-# Políticas administradas de CloudFront (cache / origin request)
-data "aws_cloudfront_cache_policy" "optimized" {
-  name = "Managed-CachingOptimized"
-}
-
-data "aws_cloudfront_cache_policy" "disabled" {
-  name = "Managed-CachingDisabled"
-}
-
-data "aws_cloudfront_origin_request_policy" "all_viewer" {
-  name = "Managed-AllViewerExceptHostHeader"
-}
+# Nota: las políticas administradas de CloudFront NO se consultan por data
+# source porque el rol del Learner Lab no tiene cloudfront:ListCachePolicies.
+# Se usan sus IDs globales fijos (ver locals.tf).

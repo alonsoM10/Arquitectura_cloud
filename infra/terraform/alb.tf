@@ -35,19 +35,15 @@ resource "aws_lb_target_group" "svc" {
   tags = { Name = "${var.name_prefix}-${each.key}" }
 }
 
-# Listener HTTP:80. Respuesta por defecto = 404 (ruta no mapeada)
+# Listener HTTP:80. Por defecto sirve el frontend (todo lo que no sea /api).
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "application/json"
-      message_body = "{\"error\":\"ruta no encontrada\"}"
-      status_code  = "404"
-    }
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend.arn
   }
 }
 

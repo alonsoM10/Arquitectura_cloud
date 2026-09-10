@@ -1,169 +1,130 @@
 # =====================================================================
-#  FRONTEND — S3 (estático privado) + CloudFront (CDN/HTTPS) + WAF
-#  Reemplaza al contenedor Nginx. CloudFront sirve el sitio y reenvía
-#  /api/* al ALB → un solo dominio, HTTPS y sin problemas de CORS.
+#  FRONTEND — 5º contenedor en ECS Fargate, detrás del ALB
+# =====================================================================
+#  NOTA DE DISEÑO: el Diagrama B contemplaba S3 + CloudFront + WAF para
+#  el frontend (más barato/seguro, HTTPS y CDN). El AWS Academy Learner
+#  Lab los BLOQUEA mediante una Service Control Policy de la organización
+#  (deny explícito a S3 object-lock y a cloudfront:*). Por eso, para la
+#  demo, el frontend se despliega como contenedor Nginx en Fargate y el
+#  ALB lo sirve en "/". Esta limitación se documenta y justifica en el
+#  informe (pilar de Seguridad/Costos del Well-Architected).
 # =====================================================================
 
-# --- Bucket S3 privado (solo accesible vía CloudFront) ---
-resource "aws_s3_bucket" "frontend" {
-  bucket        = "${var.name_prefix}-frontend-${local.account_id}"
-  force_destroy = true
-  tags          = { Name = "${var.name_prefix}-frontend" }
-}
+resource "aws_ecr_repository" "frontend" {
+  name                 = "${var.name_prefix}-frontend"
+  force_delete         = true
+  image_tag_mutability = "MUTABLE"
 
-resource "aws_s3_bucket_public_access_block" "frontend" {
-  bucket                  = aws_s3_bucket.frontend.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-# Sube todos los archivos del frontend al bucket
-locals {
-  frontend_dir = "${path.module}/../../app/microservicioFrontend"
-  content_types = {
-    "html" = "text/html"
-    "css"  = "text/css"
-    "js"   = "application/javascript"
-    "png"  = "image/png"
-    "jpg"  = "image/jpeg"
-    "svg"  = "image/svg+xml"
-    "ico"  = "image/x-icon"
-    "json" = "application/json"
-  }
-}
-
-resource "aws_s3_object" "frontend" {
-  for_each = fileset(local.frontend_dir, "**")
-
-  bucket       = aws_s3_bucket.frontend.id
-  key          = each.value
-  source       = "${local.frontend_dir}/${each.value}"
-  etag         = filemd5("${local.frontend_dir}/${each.value}")
-  content_type = lookup(local.content_types, lower(reverse(split(".", each.value))[0]), "application/octet-stream")
-}
-
-# --- Origin Access Control: solo CloudFront puede leer el bucket ---
-resource "aws_cloudfront_origin_access_control" "s3" {
-  name                              = "${var.name_prefix}-oac"
-  origin_access_control_origin_type = "s3"
-  signing_behavior                  = "always"
-  signing_protocol                  = "sigv4"
-}
-
-# --- WAF (opcional: algunos Learner Lab restringen WAFv2) ---
-resource "aws_wafv2_web_acl" "cf" {
-  count = var.enable_waf ? 1 : 0
-
-  name  = "${var.name_prefix}-waf"
-  scope = "CLOUDFRONT" # requiere provider en us-east-1 (ya lo estamos)
-
-  default_action {
-    allow {}
+  image_scanning_configuration {
+    scan_on_push = true
   }
 
-  rule {
-    name     = "AWSManagedCommon"
-    priority = 1
-    override_action {
-      none {}
-    }
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesCommonRuleSet"
-        vendor_name = "AWS"
+  tags = { Name = "${var.name_prefix}-frontend" }
+}
+
+resource "aws_cloudwatch_log_group" "frontend" {
+  name              = "/ecs/${var.name_prefix}/frontend"
+  retention_in_days = 7
+}
+
+resource "aws_ecs_task_definition" "frontend" {
+  family                   = "${var.name_prefix}-frontend"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = data.aws_iam_role.lab.arn
+  task_role_arn            = data.aws_iam_role.lab.arn
+
+  runtime_platform {
+    cpu_architecture        = "X86_64"
+    operating_system_family = "LINUX"
+  }
+
+  container_definitions = jsonencode([
+    {
+      name         = "frontend"
+      image        = "${local.ecr_registry}/${var.name_prefix}-frontend:latest"
+      essential    = true
+      portMappings = [{ containerPort = 80 }]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.frontend.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "ecs"
+        }
       }
     }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "common"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  visibility_config {
-    cloudwatch_metrics_enabled = true
-    metric_name                = "${var.name_prefix}-waf"
-    sampled_requests_enabled   = true
-  }
+  ])
 }
 
-# --- CloudFront: 2 orígenes (S3 estático + ALB para /api/*) ---
-resource "aws_cloudfront_distribution" "main" {
-  enabled             = true
-  default_root_object = "index.html"
-  comment             = "${var.name_prefix} - FreshBox EP1"
-  web_acl_id          = var.enable_waf ? aws_wafv2_web_acl.cf[0].arn : null
+resource "aws_lb_target_group" "frontend" {
+  name        = "${var.name_prefix}-frontend"
+  port        = 80
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
 
-  origin {
-    domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
-    origin_id                = "s3-frontend"
-    origin_access_control_id = aws_cloudfront_origin_access_control.s3.id
+  health_check {
+    path                = "/"
+    matcher             = "200"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
   }
 
-  origin {
-    domain_name = aws_lb.main.dns_name
-    origin_id   = "alb-api"
-    custom_origin_config {
-      http_port              = 80
-      https_port             = 443
-      origin_protocol_policy = "http-only"
-      origin_ssl_protocols   = ["TLSv1.2"]
-    }
-  }
-
-  # Sitio estático → S3
-  default_cache_behavior {
-    target_origin_id       = "s3-frontend"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
-  }
-
-  # API → ALB (sin caché, reenvía todos los métodos)
-  ordered_cache_behavior {
-    path_pattern             = "/api/*"
-    target_origin_id         = "alb-api"
-    viewer_protocol_policy   = "redirect-to-https"
-    allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-    cached_methods           = ["GET", "HEAD"]
-    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
-    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
-  }
-
-  restrictions {
-    geo_restriction {
-      restriction_type = "none"
-    }
-  }
-
-  viewer_certificate {
-    cloudfront_default_certificate = true # HTTPS con el dominio *.cloudfront.net
-  }
-
-  tags = { Name = "${var.name_prefix}-cf" }
+  tags = { Name = "${var.name_prefix}-frontend" }
 }
 
-# --- Política del bucket: permite lectura solo a esta distribución ---
-data "aws_iam_policy_document" "s3_cf" {
-  statement {
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.frontend.arn}/*"]
-    principals {
-      type        = "Service"
-      identifiers = ["cloudfront.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "AWS:SourceArn"
-      values   = [aws_cloudfront_distribution.main.arn]
-    }
+resource "aws_ecs_service" "frontend" {
+  name            = "${var.name_prefix}-frontend"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.frontend.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = local.app_subnet_ids
+    security_groups  = [aws_security_group.app.id]
+    assign_public_ip = false
   }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.frontend.arn
+    container_name   = "frontend"
+    container_port   = 80
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
+  depends_on = [aws_lb_listener.http]
 }
 
-resource "aws_s3_bucket_policy" "frontend" {
-  bucket = aws_s3_bucket.frontend.id
-  policy = data.aws_iam_policy_document.s3_cf.json
+# Auto Scaling del frontend (mín 2, máx 4, objetivo CPU 70%)
+resource "aws_appautoscaling_target" "frontend" {
+  max_capacity       = 4
+  min_capacity       = 2
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.frontend.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "frontend_cpu" {
+  name               = "frontend-cpu70"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.frontend.resource_id
+  scalable_dimension = aws_appautoscaling_target.frontend.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.frontend.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+    target_value = 70
+  }
 }
