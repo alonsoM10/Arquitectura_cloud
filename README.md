@@ -1,4 +1,4 @@
-ñ# Arquitectura Cloud — FreshBox SpA (EP1 · ARY1102)
+Arquitectura Cloud — FreshBox SpA (EP1 · ARY1102)
 
 Plataforma de **catálogo online de productos orgánicos** para FreshBox SpA.
 Arquitectura cloud en AWS, escalable, segura y de alta disponibilidad (Multi-AZ),
