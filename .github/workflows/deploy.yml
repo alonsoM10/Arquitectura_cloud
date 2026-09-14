@@ -1,0 +1,64 @@
+name: Deploy (Terraform + ECR + Seed)
+
+# Se ejecuta manualmente desde la pestaña Actions -> Run workflow
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/terraform
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS (del Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      # Nota: cada Learner Lab es una cuenta nueva, por eso el deploy parte
+      # con estado fresco. Flujo esperado: Deploy -> capturar evidencia -> Destroy.
+
+      - name: Terraform Init + Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+
+      - name: Construir y subir imágenes a ECR
+        run: bash infra/scripts/ecr-push.sh
+
+      - name: Sembrar la base de datos
+        run: bash infra/scripts/seed-db.sh
+
+      - name: Mostrar URL de la aplicación
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "===================================================="
+          echo "APP URL: $(terraform output -raw app_url)"
+          echo "===================================================="
+
+      - name: Guardar estado de Terraform (para poder destruir luego)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfstate
+          path: ${{ env.TF_DIR }}/terraform.tfstate
+          retention-days: 30
+          overwrite: true

@@ -1,0 +1,2 @@
+# Forzar saltos de línea LF en scripts (evita errores \r en los runners Linux)
+*.sh text eol=lf
