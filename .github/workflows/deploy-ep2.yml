@@ -128,6 +128,9 @@ jobs:
             --set vpcId="${{ steps.tf.outputs.vpc_id }}" \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
+            --set enableShield=false \
+            --set enableWaf=false \
+            --set enableWafv2=false \
             --wait --timeout 10m
 
       - name: Verificar que el controller está corriendo
