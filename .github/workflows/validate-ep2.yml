@@ -1,0 +1,41 @@
+name: Validate EP2 (Terraform)
+
+# Valida la sintaxis del Terraform de EP2 SIN credenciales AWS y SIN crear
+# nada. Sirve para detectar errores antes de encender el Learner Lab.
+on:
+  push:
+    paths:
+      - 'infra/terraform-ep2/**'
+      - '.github/workflows/validate-ep2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_DIR: infra/terraform-ep2
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Formato (terraform fmt)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive -diff
+
+      - name: Init sin backend (no toca AWS)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -backend=false -input=false
+
+      - name: Validar configuración
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
