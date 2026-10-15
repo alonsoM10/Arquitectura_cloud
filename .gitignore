@@ -11,6 +11,7 @@ npm-debug.log*
 *.tfstate.*
 crash.log
 crash.*.log
+apply.log
 # Nunca subir variables con secretos; sí subir el ejemplo
 *.tfvars
 !*.tfvars.example

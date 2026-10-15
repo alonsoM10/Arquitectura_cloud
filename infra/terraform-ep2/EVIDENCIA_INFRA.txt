@@ -1,0 +1,58 @@
+===== EVIDENCIA INFRA EP2 FreshBox - Thu Oct 15 01:51:22 HSP 2026 =====
+
+## EKS CLUSTER
+-------------------------------------------
+|             DescribeCluster             |
++-------------------+---------+-----------+
+|       name        | status  |  version  |
++-------------------+---------+-----------+
+|  freshbox-cluster |  ACTIVE |  1.31     |
++-------------------+---------+-----------+
+## NODE GROUP
+---------------------------------------------------------------
+|                      DescribeNodegroup                      |
++-------------------------+----------+------+------+----------+
+|         amiType         | desired  | max  | min  | status   |
++-------------------------+----------+------+------+----------+
+|  AL2023_ARM_64_STANDARD |  2       |  4   |  2   |  ACTIVE  |
++-------------------------+----------+------+------+----------+
+||                       instanceTypes                       ||
+|+-----------------------------------------------------------+|
+||  t4g.small                                                ||
+|+-----------------------------------------------------------+|
+## NODOS K8S
+NAME                         STATUS   ROLES    AGE   VERSION                INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                     CONTAINER-RUNTIME
+ip-10-0-1-101.ec2.internal   Ready    <none>   11m   v1.31.14-eks-3b4a6ca   10.0.1.101    <none>        Amazon Linux 2023.12.20260930   6.1.188-233.386.amzn2023.aarch64   containerd://2.2.7+unknown
+ip-10-0-1-59.ec2.internal    Ready    <none>   11m   v1.31.14-eks-3b4a6ca   10.0.1.59     <none>        Amazon Linux 2023.12.20260930   6.1.188-233.386.amzn2023.aarch64   containerd://2.2.7+unknown
+## RDS MULTI-AZ
+--------------------------------------
+|         DescribeDBInstances        |
++------------+-----------------------+
+|  class     |  db.t4g.small         |
+|  encrypted |  True                 |
+|  engine    |  8.0.46-rds.20260908  |
+|  id        |  freshbox-mysql       |
+|  multiAZ   |  True                 |
+|  status    |  available            |
++------------+-----------------------+
+## ECR REPOS
+-----------------------------
+|   DescribeRepositories    |
++---------------------------+
+|  freshbox-create-product  |
+|  freshbox-update-product  |
+|  freshbox-get-products    |
+|  freshbox-delete-product  |
+|  freshbox-frontend        |
++---------------------------+
+## SEED / NAMESPACE
+NAME                      STATUS     COMPLETIONS   DURATION   AGE
+job.batch/freshbox-seed   Complete   1/1           14s        97s
+
+NAME                         DATA   AGE
+configmap/freshbox-config    3      2m
+configmap/freshbox-initsql   1      104s
+configmap/kube-root-ca.crt   1      2m7s
+
+NAME                     TYPE     DATA   AGE
+secret/freshbox-secret   Opaque   2      116s
