@@ -1,0 +1,65 @@
+name: Destroy EP2 (EKS + RDS Multi-AZ)
+
+# Apaga TODA la infraestructura de EP2 para no gastar el presupuesto del
+# laboratorio. Ejecutar siempre después de capturar la evidencia.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/terraform-ep2
+  CLUSTER_NAME: freshbox-cluster
+  NAMESPACE: freshbox
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS (del Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Recuperar el estado del despliegue
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: deploy-ep2.yml
+          name: tfstate-ep2
+          path: ${{ env.TF_DIR }}
+
+      # El Ingress crea un ALB que Terraform NO conoce (lo creó el
+      # controller). Si no se borra primero, quedan ENIs colgando y el
+      # destroy de la VPC falla. Por eso se elimina el Ingress antes.
+      - name: Eliminar el Ingress para liberar el ALB
+        continue-on-error: true
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION" || exit 0
+          kubectl delete ingress freshbox-ingress -n "$NAMESPACE" --ignore-not-found --timeout=5m
+          echo ">> Esperando a que el controller borre el ALB..."
+          sleep 60
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform destroy -auto-approve -input=false
+
+      - name: Confirmación
+        run: echo "Infraestructura de EP2 destruida. Presupuesto del lab a salvo."

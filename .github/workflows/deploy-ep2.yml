@@ -1,0 +1,335 @@
+name: Deploy EP2 (EKS + RDS Multi-AZ)
+
+# Se ejecuta manualmente desde Actions -> Run workflow.
+# Requiere los 3 secretos del Learner Lab ACTUALIZADOS (duran ~4 h):
+#   AWS_ACCESS_KEY_ID · AWS_SECRET_ACCESS_KEY · AWS_SESSION_TOKEN
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/terraform-ep2
+  CLUSTER_NAME: freshbox-cluster
+  NAMESPACE: freshbox
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS (del Learner Lab)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      # Recupera el estado de una ejecución anterior para que un re-run sea
+      # incremental y no intente volver a crear lo que ya existe.
+      - name: Recuperar estado previo de Terraform (si existe)
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: deploy-ep2.yml
+          name: tfstate-ep2
+          path: ${{ env.TF_DIR }}
+          if_no_artifact_found: warn
+
+      # ---------------------------------------------------------------
+      #  1) INFRAESTRUCTURA
+      #     VPC + NAT + SG + KMS + RDS Multi-AZ + ECR + EKS + Node Group
+      #     El clúster y la RDS tardan ~15 min cada uno (en paralelo).
+      # ---------------------------------------------------------------
+      - name: Terraform Init + Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+
+      - name: Leer salidas de Terraform
+        id: tf
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "account_id=$(terraform output -raw account_id)"        >> "$GITHUB_OUTPUT"
+          echo "rds_endpoint=$(terraform output -raw rds_endpoint)"    >> "$GITHUB_OUTPUT"
+          echo "db_name=$(terraform output -raw db_name)"              >> "$GITHUB_OUTPUT"
+          echo "db_secret_arn=$(terraform output -raw db_secret_arn)"  >> "$GITHUB_OUTPUT"
+          echo "vpc_id=$(terraform output -raw vpc_id)"                >> "$GITHUB_OUTPUT"
+          echo "alb_sg_id=$(terraform output -raw alb_security_group_id)" >> "$GITHUB_OUTPUT"
+          echo "public_subnets=$(terraform output -json public_subnet_ids | jq -r 'join(",")')" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------
+      #  2) IMÁGENES DOCKER (ARM64)
+      #     Los nodos son t4g.small = Graviton. QEMU permite compilar
+      #     ARM64 desde el runner x86 de GitHub.
+      # ---------------------------------------------------------------
+      - name: Preparar QEMU (emulación ARM64)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Preparar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir y subir las 5 imágenes ARM64 a ECR
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          TARGET_PLATFORM: linux/arm64
+        run: bash infra/scripts-ep2/ecr-push.sh
+
+      # ---------------------------------------------------------------
+      #  3) ACCESO AL CLÚSTER
+      # ---------------------------------------------------------------
+      - name: Configurar kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name "$CLUSTER_NAME" --region "$AWS_REGION"
+          kubectl version --client
+          kubectl get nodes -o wide
+
+      - name: Esperar a que los nodos estén Ready
+        run: kubectl wait --for=condition=Ready nodes --all --timeout=10m
+
+      # ---------------------------------------------------------------
+      #  4) AWS LOAD BALANCER CONTROLLER
+      #     Sin OIDC/IRSA (el lab no deja crear roles), el controller toma
+      #     las credenciales del rol del nodo vía IMDS. Funciona gracias al
+      #     hop limit 2 configurado en el launch template.
+      # ---------------------------------------------------------------
+      - name: Instalar AWS Load Balancer Controller (Helm)
+        run: |
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+          helm upgrade --install aws-load-balancer-controller \
+            eks/aws-load-balancer-controller \
+            --namespace kube-system \
+            --set clusterName="$CLUSTER_NAME" \
+            --set region="$AWS_REGION" \
+            --set vpcId="${{ steps.tf.outputs.vpc_id }}" \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --wait --timeout 10m
+
+      - name: Verificar que el controller está corriendo
+        run: |
+          kubectl -n kube-system rollout status \
+            deployment/aws-load-balancer-controller --timeout=5m
+          kubectl -n kube-system get pods -l app.kubernetes.io/name=aws-load-balancer-controller
+
+      # ---------------------------------------------------------------
+      #  5) CONFIGURACIÓN DE LA APLICACIÓN
+      #     Las credenciales salen de Secrets Manager, nunca del repo.
+      # ---------------------------------------------------------------
+      - name: Crear namespace, ConfigMap y Secret
+        env:
+          ACCOUNT_ID: ${{ steps.tf.outputs.account_id }}
+          RDS_ENDPOINT: ${{ steps.tf.outputs.rds_endpoint }}
+          DB_NAME: ${{ steps.tf.outputs.db_name }}
+          DB_SECRET_ARN: ${{ steps.tf.outputs.db_secret_arn }}
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+
+          SECRET_JSON="$(aws secretsmanager get-secret-value \
+            --secret-id "$DB_SECRET_ARN" \
+            --query SecretString --output text)"
+          DB_USER="$(echo "$SECRET_JSON" | jq -r .username)"
+          DB_PASS="$(echo "$SECRET_JSON" | jq -r .password)"
+          echo "::add-mask::$DB_PASS"
+
+          kubectl create configmap freshbox-config -n "$NAMESPACE" \
+            --from-literal=DB_HOST="$RDS_ENDPOINT" \
+            --from-literal=DB_NAME="$DB_NAME" \
+            --from-literal=DB_PORT="3306" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic freshbox-secret -n "$NAMESPACE" \
+            --from-literal=DB_USER="$DB_USER" \
+            --from-literal=DB_PASS="$DB_PASS" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # ---------------------------------------------------------------
+      #  6) SEMBRAR LA BASE DE DATOS
+      #     Un Job efímero dentro del clúster: la RDS nunca se expone.
+      # ---------------------------------------------------------------
+      - name: Cargar init.sql en la RDS
+        run: |
+          kubectl create configmap freshbox-initsql -n "$NAMESPACE" \
+            --from-file=init.sql=app-ep2/init.sql \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl delete job freshbox-seed -n "$NAMESPACE" --ignore-not-found
+
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: freshbox-seed
+            namespace: freshbox
+          spec:
+            backoffLimit: 3
+            template:
+              spec:
+                restartPolicy: OnFailure
+                containers:
+                  - name: seed
+                    image: mysql:8.0
+                    command: ["/bin/sh","-c"]
+                    args:
+                      - >
+                        mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER"
+                        -p"$DB_PASS" "$DB_NAME" < /sql/init.sql
+                        && echo "SEED OK"
+                    envFrom:
+                      - configMapRef: { name: freshbox-config }
+                      - secretRef:    { name: freshbox-secret }
+                    volumeMounts:
+                      - name: sql
+                        mountPath: /sql
+                volumes:
+                  - name: sql
+                    configMap: { name: freshbox-initsql }
+          EOF
+
+          kubectl wait --for=condition=complete job/freshbox-seed \
+            -n "$NAMESPACE" --timeout=5m
+          kubectl logs job/freshbox-seed -n "$NAMESPACE"
+
+      # ---------------------------------------------------------------
+      #  7) DESPLIEGUE DE LOS 5 MICROSERVICIOS + INGRESS + HPA
+      # ---------------------------------------------------------------
+      - name: Aplicar Deployments y Services
+        env:
+          ACCOUNT_ID: ${{ steps.tf.outputs.account_id }}
+        run: |
+          for f in k8s/*-deployment.yaml; do
+            sed "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" "$f" | kubectl apply -f -
+          done
+          kubectl -n "$NAMESPACE" get deploy,svc
+
+      - name: Aplicar el ALB Ingress
+        env:
+          PUBLIC_SUBNET_IDS: ${{ steps.tf.outputs.public_subnets }}
+          ALB_SG_ID: ${{ steps.tf.outputs.alb_sg_id }}
+        run: |
+          envsubst '${PUBLIC_SUBNET_IDS} ${ALB_SG_ID}' \
+            < k8s/ingress.yaml | kubectl apply -f -
+
+      - name: Aplicar el HPA
+        run: |
+          kubectl apply -f k8s/hpa.yaml
+          kubectl -n "$NAMESPACE" get hpa
+
+      - name: Esperar a que los 10 Pods estén Running
+        run: |
+          kubectl -n "$NAMESPACE" rollout status deploy/frontend       --timeout=5m
+          kubectl -n "$NAMESPACE" rollout status deploy/get-products   --timeout=5m
+          kubectl -n "$NAMESPACE" rollout status deploy/create-product --timeout=5m
+          kubectl -n "$NAMESPACE" rollout status deploy/update-product --timeout=5m
+          kubectl -n "$NAMESPACE" rollout status deploy/delete-product --timeout=5m
+          kubectl -n "$NAMESPACE" get pods -o wide
+
+      # ---------------------------------------------------------------
+      #  8) OBSERVABILIDAD (best-effort: el lab puede bloquearlo)
+      # ---------------------------------------------------------------
+      - name: Habilitar CloudWatch Container Insights
+        continue-on-error: true
+        run: |
+          aws eks create-addon \
+            --cluster-name "$CLUSTER_NAME" \
+            --addon-name amazon-cloudwatch-observability \
+            --region "$AWS_REGION" \
+          || echo "Container Insights no disponible en este lab (documentar en el informe)."
+
+      # ---------------------------------------------------------------
+      #  9) VALIDACIÓN DEL CRUD VÍA ALB
+      # ---------------------------------------------------------------
+      - name: Esperar la URL del ALB
+        id: alb
+        run: |
+          for i in $(seq 1 40); do
+            HOST="$(kubectl -n "$NAMESPACE" get ingress freshbox-ingress \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            if [ -n "$HOST" ]; then
+              echo "url=http://$HOST" >> "$GITHUB_OUTPUT"
+              echo "ALB listo: http://$HOST"
+              exit 0
+            fi
+            echo "  esperando al ALB ($i/40)..."
+            sleep 15
+          done
+          echo "El Ingress no obtuvo direccion. Revisa los logs del controller:"
+          kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=50
+          exit 1
+
+      - name: Validar el CRUD end-to-end
+        env:
+          URL: ${{ steps.alb.outputs.url }}
+        run: |
+          echo ">> Esperando a que el ALB responda..."
+          for i in $(seq 1 30); do
+            curl -fsS "$URL/api/products" >/dev/null 2>&1 && break
+            sleep 10
+          done
+
+          echo ">> GET (catalogo inicial)"
+          curl -fsS "$URL/api/products" | head -c 400; echo
+
+          echo ">> POST (crear)"
+          NEW_ID="$(curl -fsS -X POST "$URL/api/products" \
+            -H 'Content-Type: application/json' \
+            -d '{"nombre":"Prueba CI","descripcion":"Alta automatica","precio":1990,"stock":7,"categoria":"Frutas"}' \
+            | jq -r '.id // .insertId // empty')"
+          echo "   id creado: ${NEW_ID:-<sin id en la respuesta>}"
+
+          if [ -n "${NEW_ID:-}" ]; then
+            echo ">> PUT (modificar)"
+            curl -fsS -X PUT "$URL/api/products/$NEW_ID" \
+              -H 'Content-Type: application/json' \
+              -d '{"nombre":"Prueba CI editada","descripcion":"Modificada","precio":2990,"stock":3,"categoria":"Frutas"}' \
+              | head -c 300; echo
+
+            echo ">> DELETE (eliminar)"
+            curl -fsS -X DELETE "$URL/api/products/$NEW_ID" | head -c 300; echo
+          fi
+
+          echo ">> GET (catalogo final)"
+          curl -fsS "$URL/api/products" | head -c 400; echo
+          echo ">> CRUD validado."
+
+      - name: Resumen del despliegue
+        if: always()
+        env:
+          URL: ${{ steps.alb.outputs.url }}
+        run: |
+          {
+            echo "## FreshBox EP2 — despliegue en EKS"
+            echo ""
+            echo "| Recurso | Valor |"
+            echo "|---|---|"
+            echo "| URL de la aplicación | ${URL:-no disponible} |"
+            echo "| Clúster | \`$CLUSTER_NAME\` |"
+            echo "| RDS (Multi-AZ) | \`${{ steps.tf.outputs.rds_endpoint }}\` |"
+            echo ""
+            echo "Recuerda ejecutar **Destroy EP2** al terminar de capturar la evidencia."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar el estado de Terraform
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfstate-ep2
+          path: ${{ env.TF_DIR }}/terraform.tfstate
+          retention-days: 30
+          overwrite: true

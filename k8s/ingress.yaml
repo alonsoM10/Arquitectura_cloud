@@ -1,0 +1,83 @@
+# =====================================================================
+#  ALB Ingress — enrutamiento por RUTA y MÉTODO HTTP
+#
+#  El manifiesto original del recurso AVA enviaba todo /api/products al
+#  servicio get-products, por lo que POST, PUT y DELETE terminaban en el
+#  microservicio de consulta y el CRUD fallaba. Aquí se replica el diseño
+#  de EP1: el balanceador discrimina por método usando las condiciones
+#  personalizadas del AWS Load Balancer Controller.
+#
+#  El ORDEN de las rutas importa: el ALB evalúa las reglas de arriba hacia
+#  abajo, por lo que las reglas con método van ANTES del GET genérico.
+# =====================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: freshbox-ingress
+  namespace: freshbox
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/subnets: ${PUBLIC_SUBNET_IDS}
+    alb.ingress.kubernetes.io/security-groups: ${ALB_SG_ID}
+    # Deja que el controller gestione el SG de los nodos como destino
+    alb.ingress.kubernetes.io/manage-backend-security-group-rules: "true"
+
+    # --- Enrutamiento por método HTTP ---
+    alb.ingress.kubernetes.io/conditions.create-product: >
+      [{"field":"http-request-method","httpRequestMethodConfig":{"values":["POST"]}}]
+    alb.ingress.kubernetes.io/conditions.update-product: >
+      [{"field":"http-request-method","httpRequestMethodConfig":{"values":["PUT"]}}]
+    alb.ingress.kubernetes.io/conditions.delete-product: >
+      [{"field":"http-request-method","httpRequestMethodConfig":{"values":["DELETE"]}}]
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # POST /api/products -> create-product
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: create-product
+                port:
+                  number: 3002
+
+          # PUT /api/products/:id -> update-product
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: update-product
+                port:
+                  number: 3003
+
+          # DELETE /api/products/:id -> delete-product
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: delete-product
+                port:
+                  number: 3004
+
+          # GET /api/products (y cualquier otro método no cubierto arriba)
+          - path: /api/products
+            pathType: Prefix
+            backend:
+              service:
+                name: get-products
+                port:
+                  number: 3001
+
+          # Resto del tráfico -> frontend Nginx
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
