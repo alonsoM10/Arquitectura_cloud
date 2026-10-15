@@ -48,10 +48,17 @@ resource "aws_launch_template" "nodes" {
     device_name = "/dev/xvda"
 
     ebs {
-      volume_size           = var.node_disk_size
-      volume_type           = "gp3"
+      volume_size = var.node_disk_size
+      volume_type = "gp3"
+
+      # Cifrado con la llave gestionada por AWS (aws/ebs), NO con la llave
+      # propia del proyecto. El grupo de Auto Scaling que lanza los nodos
+      # necesita un grant explícito sobre una llave de cliente, y el
+      # Learner Lab no permite otorgarlo: las instancias fallaban con
+      # Client.InvalidKMSKey.InvalidState y nunca se unían al clúster.
+      # La llave de cliente sí se usa en la RDS, que no tiene esa
+      # restricción (ver rds.tf).
       encrypted             = true
-      kms_key_id            = aws_kms_key.main.arn
       delete_on_termination = true
     }
   }
