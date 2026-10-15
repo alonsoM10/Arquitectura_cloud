@@ -4,9 +4,15 @@ name: Destroy EP2 (EKS + RDS Multi-AZ)
 # laboratorio. Ejecutar siempre después de capturar la evidencia.
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: "ID de la corrida de Deploy de la que tomar el estado (vacío = la última)"
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 env:
   AWS_REGION: us-east-1
@@ -34,20 +40,48 @@ jobs:
       - name: Instalar Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.15.8
+          terraform_version: 1.9.8
           terraform_wrapper: false
 
-      # workflow_conclusion vacío = toma la última corrida que haya dejado
-      # estado, haya terminado bien o mal. Con el valor por defecto
-      # ("success") no encuentra nada cuando el deploy falló, que es
-      # justamente cuando más falta hace poder destruir.
+      # Se descarga el estado con el CLI oficial de GitHub (gh), que lista
+      # las corridas del deploy SIN filtrar por resultado. La acción de
+      # terceros solo miraba corridas "success" y por eso no hallaba el
+      # estado cuando el deploy fallaba, que es justo cuando hay que
+      # destruir. Si se indica run_id, usa esa corrida; si no, la última
+      # que tenga el artifact tfstate-ep2.
       - name: Recuperar el estado del despliegue
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: deploy-ep2.yml
-          workflow_conclusion: ""
-          name: tfstate-ep2
-          path: ${{ env.TF_DIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RUN_ID_INPUT:-}" ]; then
+            RUN_ID="$RUN_ID_INPUT"
+          else
+            RUN_ID="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow deploy-ep2.yml \
+              --limit 20 --json databaseId,createdAt \
+              --jq 'sort_by(.createdAt) | reverse | .[].databaseId' \
+            | while read -r id; do
+                if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                     --jq '.artifacts[].name' 2>/dev/null | grep -qx tfstate-ep2; then
+                  echo "$id"; break
+                fi
+              done)"
+          fi
+
+          if [ -z "${RUN_ID:-}" ]; then
+            echo "::error::No se encontró ninguna corrida de Deploy con el artifact tfstate-ep2."
+            exit 1
+          fi
+
+          echo "Usando el estado de la corrida de Deploy #$RUN_ID"
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name tfstate-ep2 \
+            --dir "$TF_DIR"
+          ls -la "$TF_DIR"/terraform.tfstate
 
       # El Ingress crea un ALB que Terraform NO conoce (lo creó el
       # controller). Si no se borra primero, quedan ENIs colgando y el

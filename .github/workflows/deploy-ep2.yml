@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   AWS_REGION: us-east-1
@@ -35,23 +36,42 @@ jobs:
       - name: Instalar Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.15.8
+          terraform_version: 1.9.8
           terraform_wrapper: false
 
-      # Recupera el estado de una ejecución anterior para que un re-run sea
-      # incremental y no intente volver a crear lo que ya existe.
+      # Recupera el estado de una ejecución anterior (exitosa o fallida) con
+      # el CLI oficial de GitHub, para que un re-run sea incremental y no
+      # intente volver a crear lo que ya existe. Si no hay estado previo
+      # (primer deploy), continúa sin error.
       - name: Recuperar estado previo de Terraform (si existe)
         continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: deploy-ep2.yml
-          # Vacío = también recupera el estado de corridas que fallaron.
-          # Sin esto, un re-run tras un fallo arranca con estado vacío e
-          # intenta recrear lo que ya existe.
-          workflow_conclusion: ""
-          name: tfstate-ep2
-          path: ${{ env.TF_DIR }}
-          if_no_artifact_found: warn
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow deploy-ep2.yml \
+            --limit 20 --json databaseId,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[].databaseId' \
+          | while read -r id; do
+              if [ "$id" = "$GITHUB_RUN_ID" ]; then continue; fi
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts" \
+                   --jq '.artifacts[].name' 2>/dev/null | grep -qx tfstate-ep2; then
+                echo "$id"; break
+              fi
+            done)"
+
+          if [ -z "${RUN_ID:-}" ]; then
+            echo "No hay estado previo: primer despliegue."
+            exit 0
+          fi
+
+          echo "Recuperando estado de la corrida #$RUN_ID"
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name tfstate-ep2 \
+            --dir "$TF_DIR"
 
       # ---------------------------------------------------------------
       #  1) INFRAESTRUCTURA
