@@ -45,6 +45,10 @@ jobs:
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: deploy-ep2.yml
+          # Vacío = también recupera el estado de corridas que fallaron.
+          # Sin esto, un re-run tras un fallo arranca con estado vacío e
+          # intenta recrear lo que ya existe.
+          workflow_conclusion: ""
           name: tfstate-ep2
           path: ${{ env.TF_DIR }}
           if_no_artifact_found: warn

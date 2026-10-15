@@ -37,10 +37,15 @@ jobs:
           terraform_version: 1.15.8
           terraform_wrapper: false
 
+      # workflow_conclusion vacío = toma la última corrida que haya dejado
+      # estado, haya terminado bien o mal. Con el valor por defecto
+      # ("success") no encuentra nada cuando el deploy falló, que es
+      # justamente cuando más falta hace poder destruir.
       - name: Recuperar el estado del despliegue
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: deploy-ep2.yml
+          workflow_conclusion: ""
           name: tfstate-ep2
           path: ${{ env.TF_DIR }}
 
