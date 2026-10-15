@@ -102,6 +102,14 @@ jobs:
       - name: Esperar a que los nodos estén Ready
         run: kubectl wait --for=condition=Ready nodes --all --timeout=10m
 
+      # El HPA necesita metrics-server para leer el consumo de CPU de los
+      # Pods. Sin él queda en <unknown>/70% y nunca escala.
+      - name: Instalar metrics-server
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=5m
+          kubectl top nodes || echo "Las metricas tardan ~1 min en aparecer."
+
       # ---------------------------------------------------------------
       #  4) AWS LOAD BALANCER CONTROLLER
       #     Sin OIDC/IRSA (el lab no deja crear roles), el controller toma
@@ -202,8 +210,13 @@ jobs:
                     configMap: { name: freshbox-initsql }
           EOF
 
-          kubectl wait --for=condition=complete job/freshbox-seed \
-            -n "$NAMESPACE" --timeout=5m
+          if ! kubectl wait --for=condition=complete job/freshbox-seed \
+               -n "$NAMESPACE" --timeout=5m; then
+            echo "::error::El seed de la base de datos no completo."
+            kubectl describe job/freshbox-seed -n "$NAMESPACE" || true
+            kubectl logs job/freshbox-seed -n "$NAMESPACE" --tail=100 || true
+            exit 1
+          fi
           kubectl logs job/freshbox-seed -n "$NAMESPACE"
 
       # ---------------------------------------------------------------

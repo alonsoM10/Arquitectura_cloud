@@ -62,7 +62,14 @@ resource "aws_launch_template" "nodes" {
     http_put_response_hop_limit = 2          # permite el acceso desde Pods
   }
 
-  vpc_security_group_ids = [aws_security_group.nodes.id]
+  # Además del SG propio, los nodos llevan el "cluster security group" que
+  # crea EKS. Sin él la comunicación nodo <-> plano de control depende solo
+  # de reglas manuales y es una fuente clásica de nodos que nunca llegan a
+  # Ready.
+  vpc_security_group_ids = [
+    aws_security_group.nodes.id,
+    aws_eks_cluster.main.vpc_config[0].cluster_security_group_id,
+  ]
 
   tag_specifications {
     resource_type = "instance"
@@ -149,13 +156,10 @@ resource "aws_eks_addon" "coredns" {
   depends_on = [aws_eks_node_group.main]
 }
 
-# metrics-server: SIN ÉL EL HPA NO FUNCIONA (queda en <unknown>/70%).
-# Es un addon gestionado desde EKS 1.28.
-resource "aws_eks_addon" "metrics_server" {
-  cluster_name                = aws_eks_cluster.main.name
-  addon_name                  = "metrics-server"
-  resolve_conflicts_on_create = "OVERWRITE"
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [aws_eks_node_group.main]
-}
+# NOTA sobre metrics-server:
+# Sin metrics-server el HPA no obtiene métricas de CPU y queda en
+# <unknown>/70%, sin escalar nunca. NO se instala aquí como addon
+# gestionado a propósito: si la versión de EKS del laboratorio no lo
+# ofreciera, el `terraform apply` fallaría recién al final, después de
+# haber creado el clúster y los nodos (~20 min perdidos). Se instala desde
+# el workflow con el manifiesto oficial, que funciona en cualquier versión.
